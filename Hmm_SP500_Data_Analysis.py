@@ -5,9 +5,6 @@ from hmmlearn import hmm
 import matplotlib.dates as mdates
 import os
 
-# ==========================================
-# 1. 数据获取与预处理
-# ==========================================
 def get_data():
     file_path = 'data/SP500_log_returns.csv'
     
@@ -20,16 +17,11 @@ def get_data():
     # 读取数据
     df = pd.read_csv(file_path, index_col=0, parse_dates=True)
     
-    # === 强制类型转换 (防止字符串报错) ===
-    # 将 'Close' 和 'Log_Ret' 列强制转换为数字，非数字变为 NaN
+    # 数据处理
     df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
     df['Log_Ret'] = pd.to_numeric(df['Log_Ret'], errors='coerce')
     
-    # === 数据清洗 ===
-    # 1. 替换无穷大值为 NaN
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    
-    # 2. 删除包含空值的行
     df.dropna(subset=['Log_Ret', 'Close'], inplace=True)
 
     # 提取训练数据
@@ -37,16 +29,8 @@ def get_data():
     
     return df, X
 
-# ==========================================
-# 2. 模型训练 (EM Algorithm)
-# ==========================================
 def train_hmm(X, n_components=3):
     print(f"正在训练 Gaussian HMM (状态数={n_components})...")
-    
-    if np.isnan(X).any():
-        print("错误：训练数据 X 中仍然包含 NaN 值！")
-        return None
-
     model = hmm.GaussianHMM(n_components=n_components, 
                             covariance_type="diag", 
                             n_iter=1000, 
@@ -64,9 +48,6 @@ def train_hmm(X, n_components=3):
     
     return model
 
-# ==========================================
-# 3. 结果可视化与保存
-# ==========================================
 def plot_and_save_results(df, model, X):
     if model is None: return
 
@@ -84,7 +65,6 @@ def plot_and_save_results(df, model, X):
     dates = df.index
     prices = df['Close'].values
     
-    # 批量转换日期，解决 matplotlib 兼容性问题
     try:
         date_nums = mdates.date2num(dates.to_pydatetime())
     except AttributeError:
@@ -95,29 +75,23 @@ def plot_and_save_results(df, model, X):
     y_max = prices.max()
     y_height = y_max - y_min
 
-    # 绘制背景色带
     for i in range(len(hidden_states)):
-        # 简单抽样绘制背景以提升速度 (每3个点画一次)
         if i % 3 == 0: 
             start_date = date_nums[i]
             rect_color = color_map[hidden_states[i]]
             
-            # 绘制矩形
             ax.add_patch(plt.Rectangle((start_date, y_min), 
-                                       1, # 宽度1天
-                                       y_height, # 高度
+                                       1,
+                                       y_height,
                                        facecolor=rect_color, 
                                        alpha=0.3, 
                                        edgecolor=None))
 
-    # 绘制价格主线
     ax.plot_date(date_nums, prices, '-', color='black', linewidth=1, label='S&P 500 Price')
     
-    # 格式化 X 轴
     ax.xaxis.set_major_locator(mdates.YearLocator(2))
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     
-    # 图例
     from matplotlib.patches import Patch
     legend_elements = [
         Patch(facecolor='green', alpha=0.3, label='Low Volatility'),
@@ -133,7 +107,7 @@ def plot_and_save_results(df, model, X):
     
     plt.tight_layout()
     
-    # === 保存图片到 fig 文件夹 ===
+    # 保存图片
     save_dir = 'fig'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -143,7 +117,6 @@ def plot_and_save_results(df, model, X):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"图像已保存至: {save_path}")
     
-    # 显示图片
     plt.show()
 
 if __name__ == "__main__":
