@@ -1,26 +1,47 @@
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import matplotlib.pyplot as plt
 from hmmlearn import hmm
 import matplotlib.dates as mdates
+import os
 
 # ==========================================
-# 1. 数据获取与预处理
+# 1. 数据获取与预处理 (修复了数据类型问题)
 # ==========================================
-def get_data(symbol='^GSPC', start='2000-01-01', end='2023-12-31'):
-    print(f"正在下载 {symbol} 数据...")
-    df = yf.download(symbol, start=start, end=end)
+def get_data():
+    file_path = 'data/SP500_log_returns.csv'
     
-    # 计算对数收益率
-    # log(Pt / Pt-1)
-    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+    if not os.path.exists(file_path):
+        print(f"错误：找不到文件 {file_path}")
+        print("请先确保 data 目录下有 SP500_log_returns.csv 文件。")
+        exit()
+
+    # 读取数据
+    # header=0 表示第一行是表头。如果 yfinance 保存了多级表头，这里可能需要调整，
+    # 但最稳妥的方法是读进来后强制转数字。
+    df = pd.read_csv(file_path, index_col=0, parse_dates=True)
     
-    # 去除NaN值
-    df = df.dropna()
+    # === 核心修复步骤 ===
+    # 强制将 'Close' 和 'Log_Ret' 列转换为数字类型
+    # errors='coerce' 会把无法转换的字符（比如多余的表头行）变成 NaN
+    df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+    df['Log_Ret'] = pd.to_numeric(df['Log_Ret'], errors='coerce')
     
-    # 提取用于训练的数据 (需转换为二维数组)
+    # === 数据清洗 ===
+    # 1. 替换无穷大值为 NaN
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    # 2. 删除包含空值 (NaN) 的行
+    # 这一步会把刚才转换失败的脏数据也一起删掉
+    original_len = len(df)
+    df.dropna(subset=['Log_Ret', 'Close'], inplace=True)
+    
+    if len(df) < original_len:
+        print(f"数据清洗：删除了 {original_len - len(df)} 行无效数据（含空值或非数字行）。")
+
+    # 提取训练数据
     X = df['Log_Ret'].values.reshape(-1, 1)
+    
     return df, X
 
 # ==========================================
@@ -29,13 +50,19 @@ def get_data(symbol='^GSPC', start='2000-01-01', end='2023-12-31'):
 def train_hmm(X, n_components=3):
     print(f"正在训练 Gaussian HMM (状态数={n_components})...")
     
-    # GaussianHMM 使用 Baum-Welch 算法进行训练
-    # covariance_type='diag' 表示对角协方差矩阵（一维数据即方差）
+    if np.isnan(X).any():
+        print("错误：训练数据 X 中仍然包含 NaN 值！")
+        return None
+
     model = hmm.GaussianHMM(n_components=n_components, 
                             covariance_type="diag", 
                             n_iter=1000, 
                             random_state=42)
-    model.fit(X)
+    try:
+        model.fit(X)
+    except ValueError as e:
+        print(f"训练出错: {e}")
+        exit()
     
     print("训练完成。")
     print("状态转移矩阵 A:\n", model.transmat_)
@@ -45,75 +72,77 @@ def train_hmm(X, n_components=3):
     return model
 
 # ==========================================
-# 3. 结果可视化 (Inference & Plotting)
+# 3. 结果可视化
 # ==========================================
 def plot_results(df, model, X):
-    # 使用 Viterbi 算法预测隐状态序列 (MAP Estimation)
+    if model is None: return
+
     hidden_states = model.predict(X)
     
-    # 为了绘图清晰，我们将不同的状态映射到颜色
-    # 我们根据方差大小排序，方差最小的为"稳定"(绿色)，最大的为"动荡"(红色)
+    # 按照方差大小排序状态颜色
     variances = np.array([np.diag(model.covars_[i]) for i in range(model.n_components)])
     order = np.argsort(variances.flatten())
     
-    # 颜色映射: 0(低波) -> 绿色, 1(中波) -> 黄色, 2(高波) -> 红色
+    # 0:低波动(绿), 1:中波动(黄), 2:高波动(红)
     color_map = {order[0]: 'green', order[1]: 'gold', order[2]: 'red'}
-    label_map = {order[0]: 'Low Volatility', order[1]: 'Medium Volatility', order[2]: 'High Volatility'}
     
     fig, ax = plt.subplots(figsize=(15, 8))
     
-    # 绘制价格曲线
     dates = df.index
+    # 此时 prices 已经是纯浮点数了，不会再报错
     prices = df['Close'].values
     
-    # 这里的技巧是：为了给曲线分段着色，我们循环绘制
-    # 实际应用中为了性能通常会用 Collection，但这里为了代码易读使用循环 scatter/plot
-    
-    # 创建一个空的背景，用不同颜色填充时间段
-    for i, state in enumerate(hidden_states):
-        # 这种逐点绘制效率较低，但逻辑最简单。
-        # 优化方案是找到状态切换点，分块绘制。
-        if i % 100 == 0: continue # 简单稀疏化以加快绘图（仅作背景参考）
-        
-        start_date = mdates.date2num(dates[i])
-        end_date = mdates.date2num(dates[i]) + 1 # 宽度设为1天
-        
-        rect_color = color_map[state]
-        
-        # 在背景上画色带
-        ax.axvspan(dates[i], dates[i] + pd.Timedelta(days=1), 
-                   facecolor=rect_color, alpha=0.3, edgecolor=None)
+    # 批量转换日期，解决 matplotlib 版本兼容性问题
+    try:
+        date_nums = mdates.date2num(dates.to_pydatetime())
+    except AttributeError:
+        date_nums = mdates.date2num(dates)
 
-    # 绘制收盘价主线
-    ax.plot(dates, prices, color='black', linewidth=1, label='S&P 500 Price')
+    # 绘制背景色带
+    # 计算 Y 轴的高度范围
+    y_min = prices.min()
+    y_max = prices.max()
+    y_height = y_max - y_min # 这里的减法之前报错，现在应该正常了
+
+    for i in range(len(hidden_states)):
+        # 简单抽样绘制背景以提升速度 (每3个点画一次)
+        if i % 3 == 0: 
+            start_date = date_nums[i]
+            rect_color = color_map[hidden_states[i]]
+            
+            # 绘制矩形
+            ax.add_patch(plt.Rectangle((start_date, y_min), 
+                                       1, # 宽度1天
+                                       y_height, # 高度
+                                       facecolor=rect_color, 
+                                       alpha=0.3, 
+                                       edgecolor=None))
+
+    # 绘制价格主线
+    ax.plot_date(date_nums, prices, '-', color='black', linewidth=1, label='S&P 500 Price')
     
-    # 添加图例（手动创建伪图例）
+    # 格式化 X 轴
+    ax.xaxis.set_major_locator(mdates.YearLocator(2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+    
+    # 图例
     from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor='green', alpha=0.3, label=f'State {order[0]} (Low Vol)'),
-        Patch(facecolor='gold', alpha=0.3, label=f'State {order[1]} (Med Vol)'),
-        Patch(facecolor='red', alpha=0.3, label=f'State {order[2]} (High Vol)'),
-        plt.Line2D([0], [0], color='black', lw=1, label='S&P 500 Price')
+        Patch(facecolor='green', alpha=0.3, label='Low Volatility'),
+        Patch(facecolor='gold', alpha=0.3, label='Medium Volatility'),
+        Patch(facecolor='red', alpha=0.3, label='High Volatility'),
+        plt.Line2D([0], [0], color='black', lw=1, label='Price')
     ]
     
     ax.legend(handles=legend_elements, loc='upper left')
-    ax.set_title('S&P 500 Market Regimes Detection using Gaussian HMM', fontsize=16)
+    ax.set_title('S&P 500 Market Regimes Detection (Gaussian HMM)', fontsize=16)
     ax.set_ylabel('Price ($)', fontsize=12)
-    ax.set_xlabel('Year', fontsize=12)
     ax.grid(True, linestyle='--', alpha=0.6)
     
     plt.tight_layout()
     plt.show()
 
-# ==========================================
-# 主程序
-# ==========================================
 if __name__ == "__main__":
-    # 1. 获取数据
     df, X = get_data()
-    
-    # 2. 训练模型
     model = train_hmm(X, n_components=3)
-    
-    # 3. 展示结果
     plot_results(df, model, X)
