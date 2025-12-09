@@ -6,24 +6,22 @@ import matplotlib.dates as mdates
 import os
 
 # ==========================================
-# 1. 数据获取与预处理 (修复了数据类型问题)
+# 1. 数据获取与预处理
 # ==========================================
 def get_data():
     file_path = 'data/SP500_log_returns.csv'
     
+    # 检查文件是否存在
     if not os.path.exists(file_path):
         print(f"错误：找不到文件 {file_path}")
         print("请先确保 data 目录下有 SP500_log_returns.csv 文件。")
         exit()
 
     # 读取数据
-    # header=0 表示第一行是表头。如果 yfinance 保存了多级表头，这里可能需要调整，
-    # 但最稳妥的方法是读进来后强制转数字。
     df = pd.read_csv(file_path, index_col=0, parse_dates=True)
     
-    # === 核心修复步骤 ===
-    # 强制将 'Close' 和 'Log_Ret' 列转换为数字类型
-    # errors='coerce' 会把无法转换的字符（比如多余的表头行）变成 NaN
+    # === 强制类型转换 (防止字符串报错) ===
+    # 将 'Close' 和 'Log_Ret' 列强制转换为数字，非数字变为 NaN
     df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
     df['Log_Ret'] = pd.to_numeric(df['Log_Ret'], errors='coerce')
     
@@ -31,13 +29,8 @@ def get_data():
     # 1. 替换无穷大值为 NaN
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    # 2. 删除包含空值 (NaN) 的行
-    # 这一步会把刚才转换失败的脏数据也一起删掉
-    original_len = len(df)
+    # 2. 删除包含空值的行
     df.dropna(subset=['Log_Ret', 'Close'], inplace=True)
-    
-    if len(df) < original_len:
-        print(f"数据清洗：删除了 {original_len - len(df)} 行无效数据（含空值或非数字行）。")
 
     # 提取训练数据
     X = df['Log_Ret'].values.reshape(-1, 1)
@@ -72,38 +65,37 @@ def train_hmm(X, n_components=3):
     return model
 
 # ==========================================
-# 3. 结果可视化
+# 3. 结果可视化与保存
 # ==========================================
-def plot_results(df, model, X):
+def plot_and_save_results(df, model, X):
     if model is None: return
 
+    print("正在生成图像...")
     hidden_states = model.predict(X)
     
-    # 按照方差大小排序状态颜色
+    # 按照方差大小排序状态颜色 (绿=稳, 红=乱)
     variances = np.array([np.diag(model.covars_[i]) for i in range(model.n_components)])
     order = np.argsort(variances.flatten())
     
-    # 0:低波动(绿), 1:中波动(黄), 2:高波动(红)
     color_map = {order[0]: 'green', order[1]: 'gold', order[2]: 'red'}
     
     fig, ax = plt.subplots(figsize=(15, 8))
     
     dates = df.index
-    # 此时 prices 已经是纯浮点数了，不会再报错
     prices = df['Close'].values
     
-    # 批量转换日期，解决 matplotlib 版本兼容性问题
+    # 批量转换日期，解决 matplotlib 兼容性问题
     try:
         date_nums = mdates.date2num(dates.to_pydatetime())
     except AttributeError:
         date_nums = mdates.date2num(dates)
 
-    # 绘制背景色带
-    # 计算 Y 轴的高度范围
+    # 计算 Y 轴范围
     y_min = prices.min()
     y_max = prices.max()
-    y_height = y_max - y_min # 这里的减法之前报错，现在应该正常了
+    y_height = y_max - y_min
 
+    # 绘制背景色带
     for i in range(len(hidden_states)):
         # 简单抽样绘制背景以提升速度 (每3个点画一次)
         if i % 3 == 0: 
@@ -140,9 +132,21 @@ def plot_results(df, model, X):
     ax.grid(True, linestyle='--', alpha=0.6)
     
     plt.tight_layout()
+    
+    # === 保存图片到 fig 文件夹 ===
+    save_dir = 'fig'
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        print(f"创建文件夹: {save_dir}")
+        
+    save_path = os.path.join(save_dir, 'hmm_sp500_result.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"图像已保存至: {save_path}")
+    
+    # 显示图片
     plt.show()
 
 if __name__ == "__main__":
     df, X = get_data()
     model = train_hmm(X, n_components=3)
-    plot_results(df, model, X)
+    plot_and_save_results(df, model, X)
